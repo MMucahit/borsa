@@ -1,425 +1,311 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
+import os
+import zipfile
+import tempfile
+import shutil
 import io
-from datetime import datetime
 
-st.set_page_config(page_title="Takas & Hacim Analiz", page_icon="📊", layout="wide")
+# ---------------------------------------------------------
+# 1. SAYFA AYARLARI
+# ---------------------------------------------------------
+st.set_page_config(page_title="Takas & Virman Analiz (ZIP)", page_icon="📦", layout="wide")
 
-# Custom CSS
 st.markdown("""
     <style>
-    .main {
-        padding: 2rem;
-    }
-    .stButton>button {
-        width: 100%;
-    }
+    .main { padding: 2rem; }
+    .stButton>button { width: 100%; border-radius: 5px; }
     </style>
 """, unsafe_allow_html=True)
 
-# Title
-st.title("📊 Takas & Hacim Analiz Sistemi")
+st.title("📦 Klasör Bazlı Takas Analizi (ZIP Yükleme)")
+st.info("""
+**Nasıl Kullanılır?**
+1. Bilgisayarınızdaki **'takas'** klasörüne sağ tıklayıp **'ZIP dosyasına sıkıştır'** deyin.
+2. Aynısını **'akd'** klasörü için yapın.
+3. Oluşan ZIP dosyalarını aşağıya yükleyin. Sistem klasör yapısını (Yıl/Ay) otomatik tanıyacaktır.
+""")
 st.markdown("---")
 
-# Sidebar
+# ---------------------------------------------------------
+# 2. YARDIMCI FONKSİYONLAR
+# ---------------------------------------------------------
+
+def clean_takas_value(val):
+    """
+    Excel'den gelen veriyi sayıya çevirir.
+    Örn: '1.234,56' -> 1234.56
+    """
+    if pd.isna(val): return 0
+    if isinstance(val, (int, float)): return val
+    
+    # String temizliği
+    val_str = str(val).strip()
+    val_str = val_str.replace(".", "")  # Binlik ayracı sil
+    val_str = val_str.replace(",", ".") # Ondalık ayracı nokta yap
+    try:
+        return float(val_str)
+    except:
+        return 0
+
+def extract_zip_and_get_files(uploaded_zip, file_type="takas"):
+    """
+    Yüklenen ZIP dosyasını geçici bir klasöre çıkarır 
+    ve içindeki dosyaları (Yıl, Ay, Gün) sırasına göre listeler.
+    """
+    file_list = []
+    
+    # Geçici klasör oluştur
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        # Zip dosyasını aç
+        with zipfile.ZipFile(uploaded_zip, 'r') as zip_ref:
+            zip_ref.extractall(temp_dir)
+            
+        # Klasörlerde gezin (os.walk)
+        for root, dirs, files in os.walk(temp_dir):
+            for file in files:
+                # Gereksiz dosyaları atla (Mac sistem dosyaları veya geçici excel dosyaları)
+                if not file.endswith(".xlsx") or file.startswith("~$") or "__MACOSX" in root:
+                    continue
+                
+                # Klasör yolunu parçala (Yıl ve Ay tespiti)
+                rel_path = os.path.relpath(root, temp_dir)
+                path_parts = rel_path.split(os.sep)
+                
+                # Klasör yapısını bulmaya çalış
+                year = 2024 # Varsayılan
+                month = 1   # Varsayılan
+                
+                for part in path_parts:
+                    if part.isdigit():
+                        val = int(part)
+                        if val > 2000: # Yıl kabul et
+                            year = val
+                        elif 1 <= val <= 12: # Ay kabul et
+                            month = val
+                
+                full_path = os.path.join(root, file)
+                
+                # Dosya isminden Gün bilgisini çekme
+                try:
+                    name_parts = file.replace(".xlsx", "").split()
+                    
+                    if file_type == "takas":
+                        # Örn: "05 09.xlsx" -> ilk kısım gün
+                        day = int(name_parts[0])
+                        sort_key = (year, month, day)
+                        display_date = f"{day}.{month}.{year}"
+                        
+                    elif file_type == "akd":
+                        # Örn: "11-19 09.xlsx" -> ilk kısım "11-19"
+                        day_range = name_parts[0]
+                        start_day = int(day_range.split("-")[0])
+                        sort_key = (year, month, start_day)
+                        display_date = f"{day_range}.{month}.{year}"
+                    
+                    file_list.append({
+                        "path": full_path,
+                        "filename": file,
+                        "sort_key": sort_key,
+                        "display": display_date
+                    })
+                except Exception:
+                    continue
+
+        # Kronolojik Sıralama (Yıl -> Ay -> Gün)
+        file_list.sort(key=lambda x: x["sort_key"])
+        return file_list, temp_dir
+
+    except zipfile.BadZipFile:
+        st.error("Yüklenen dosya geçerli bir ZIP dosyası değil.")
+        return [], None
+    except Exception as e:
+        st.error(f"ZIP açılırken hata oluştu: {e}")
+        return [], None
+
+# ---------------------------------------------------------
+# 3. SIDEBAR (DOSYA YÜKLEME)
+# ---------------------------------------------------------
 with st.sidebar:
-    st.header("📁 Dosya Yükleme")
-    st.markdown("Excel dosyalarınızı yükleyin")
+    st.header("📂 Dosya Yükleme")
     
-    st.subheader("1️⃣ Takas Dosyaları")
-    st.caption("Format: 1 09.xlsx, 8 09.xlsx")
-    takas_files = st.file_uploader(
-        "Takas", 
-        type=['xlsx'], 
-        accept_multiple_files=True,
-        key="takas"
-    )
+    st.subheader("1️⃣ Takas Klasörü (ZIP)")
+    takas_zip = st.file_uploader("Takas.zip yükleyin", type="zip")
     
-    st.subheader("2️⃣ AKD Dosyaları")
-    st.caption("Format: 11-19 09.xlsx")
-    akd_files = st.file_uploader(
-        "AKD", 
-        type=['xlsx'], 
-        accept_multiple_files=True,
-        key="akd"
-    )
-    
-    st.subheader("3️⃣ Hacim Dosyaları")
-    st.caption("Format: 11-19 09.xlsx")
-    hacim_files = st.file_uploader(
-        "Hacim", 
-        type=['xlsx'], 
-        accept_multiple_files=True,
-        key="hacim"
-    )
+    st.subheader("2️⃣ AKD Klasörü (ZIP)")
+    akd_zip = st.file_uploader("AKD.zip yükleyin", type="zip")
     
     st.markdown("---")
     process_button = st.button("🚀 Analizi Başlat", type="primary")
 
-# Helper Functions
-def parse_date(filename):
-    """Parse filename like '1 09.xlsx' -> (month, day)"""
-    name = filename.replace('.xlsx', '')
-    day, month = name.split()
-    return int(month), int(day)
-
-def parse_week_filename(filename):
-    """Parse filename like '11-19 09.xlsx' -> (month, start_day)"""
-    name = filename.replace('.xlsx', '')
-    day_range, month = name.split()
-    start_day, _ = day_range.split('-')
-    return int(month), int(start_day)
-
-def process_takas_files(takas_files):
-    """Process Takas files and calculate differences"""
-    # Sort files
-    files_dict = {f.name: f for f in takas_files}
-    sorted_names = sorted(files_dict.keys(), key=parse_date)
-    
-    diff_list = []
-    
-    for i in range(1, len(sorted_names)):
-        prev_name = sorted_names[i - 1]
-        curr_name = sorted_names[i]
-        
-        df_prev = pd.read_excel(files_dict[prev_name])
-        df_curr = pd.read_excel(files_dict[curr_name])
-        
-        # Sadece numeric olması gereken kolonları dönüştür
-        df_prev["Takas"] = (
-            df_prev["Takas"]
-            .astype(str)
-            .str.replace(".", "", regex=False)   # binlik ayırıcı noktaları sil
-            .str.replace(",", ".", regex=False)  # ondalık virgülü noktaya çevir
-            .pipe(pd.to_numeric, errors="coerce")
-        )
-
-        df_curr["Takas"] = (
-            df_curr["Takas"]
-            .astype(str)
-            .str.replace(".", "", regex=False)
-            .str.replace(",", ".", regex=False)
-            .pipe(pd.to_numeric, errors="coerce")
-        )
-
-        # Merge by Kurum
-        df_merged = pd.merge(
-            df_curr,
-            df_prev,
-            on="Kurum",
-            suffixes=("_current", "_previous"),
-            how="outer"
-        )
-        
-        # Calculate difference
-        df_merged["Takas_Diff"] = (
-            df_merged["Takas_current"].fillna(0) - 
-            df_merged["Takas_previous"].fillna(0)
-        )
-        
-        # Label the week
-        df_merged["Week"] = f"{prev_name.replace('.xlsx', '')} - {curr_name.replace('.xlsx', '')}"
-        
-        diff_list.append(df_merged)
-    
-    # Combine all differences
-    all_diffs = pd.concat(diff_list, ignore_index=True).fillna(0)
-    
-    # Ensure Week column is string type
-    all_diffs['Week'] = all_diffs['Week'].astype(str)
-    
-    return all_diffs, sorted_names
-
-def process_virman(all_diffs, akd_files, sorted_takas_names):
-    """Merge Takas differences with AKD data and calculate Virman"""
-    # Sort AKD files
-    akd_dict = {f.name: f for f in akd_files}
-    sorted_akd = sorted(akd_dict.keys(), key=parse_week_filename)
-    
-    merged_list = []
-    
-    for i, week in enumerate(all_diffs['Week'].unique()):
-        if i < len(sorted_akd):
-            df_akd = pd.read_excel(akd_dict[sorted_akd[i]])
-            merged_df = df_akd.merge(
-                all_diffs[all_diffs['Week'] == week],
-                on='Kurum',
-                how='outer'
-            )
-            merged_list.append(merged_df)
-    
-    final_df = pd.concat(merged_list, ignore_index=True).fillna(0)
-    
-    # Calculate Virman
-    final_df['Virman'] = final_df['Takas_Diff'] - final_df['Net']
-    
-    # Ensure all columns are proper types
-    final_df['Week'] = final_df['Week'].astype(str)
-    final_df['Kurum'] = final_df['Kurum'].astype(str)
-    
-    return final_df
-
-def process_hacim_files(hacim_files):
-    """Process Hacim files and calculate percentages"""
-    # Sort files
-    hacim_dict = {f.name: f for f in hacim_files}
-    sorted_names = sorted(hacim_dict.keys(), key=parse_week_filename)
-    
-    all_data = []
-    
-    for file_name in sorted_names:
-        df = pd.read_excel(hacim_dict[file_name])
-        
-        # Group by Kurum and sum
-        grouped = df.groupby("Kurum", as_index=False)["Toplam"].sum()
-        
-        # Calculate weekly total
-        grand_total = grouped["Toplam"].sum()
-        
-        # Add percentage
-        grouped["Yüzde"] = (grouped["Toplam"] / grand_total * 100).round(2)
-        
-        # Rename
-        grouped.rename(columns={"Toplam": "Haftalık Kurum Toplam"}, inplace=True)
-        
-        # Add weekly total
-        grouped["Haftalık Toplam"] = grand_total
-        
-        # Add week name
-        grouped["Hafta"] = file_name.replace('.xlsx', '')
-        
-        # Add ALL row
-        all_row = pd.DataFrame({
-            "Kurum": ["ALL"],
-            "Haftalık Kurum Toplam": [grand_total],
-            "Yüzde": [100.0],
-            "Haftalık Toplam": [grand_total],
-            "Hafta": [file_name.replace('.xlsx', '')]
-        })
-        
-        grouped = pd.concat([grouped, all_row], ignore_index=True)
-        all_data.append(grouped)
-    
-    final_df = pd.concat(all_data, ignore_index=True)
-    return final_df
-
-# Main Processing Logic
+# ---------------------------------------------------------
+# 4. İŞLEM MANTIĞI
+# ---------------------------------------------------------
 if process_button:
-    if not takas_files or not akd_files or not hacim_files:
-        st.error("❌ Lütfen tüm dosyaları yükleyin!")
+    if not takas_zip or not akd_zip:
+        st.error("❌ Lütfen her iki ZIP dosyasını da yükleyin.")
     else:
-        with st.spinner("⏳ Dosyalar işleniyor..."):
+        # Geçici değişkenler
+        takas_temp_dir = None
+        akd_temp_dir = None
+        
+        with st.spinner("📦 ZIP dosyaları açılıyor ve analiz ediliyor..."):
             try:
-                # Process Takas
-                st.info("📊 Takas dosyaları işleniyor...")
-                all_diffs, sorted_takas = process_takas_files(takas_files)
+                # 1. Dosyaları Çıkar
+                takas_files, takas_temp_dir = extract_zip_and_get_files(takas_zip, "takas")
+                akd_files, akd_temp_dir = extract_zip_and_get_files(akd_zip, "akd")
                 
-                # Process Virman
-                st.info("💰 Virman hesaplanıyor...")
-                virman_df = process_virman(all_diffs, akd_files, sorted_takas)
-                
-                # Process Hacim
-                st.info("📈 Hacim analizi yapılıyor...")
-                hacim_df = process_hacim_files(hacim_files)
-                
-                # Store in session state
-                st.session_state['virman_df'] = virman_df
-                st.session_state['hacim_df'] = hacim_df
-                st.session_state['processed'] = True
-                
-                st.success("✅ İşlem başarıyla tamamlandı!")
-                
-            except Exception as e:
-                st.error(f"❌ Hata oluştu: {str(e)}")
+                if not takas_files or not akd_files:
+                    st.error("ZIP içeriğinde uygun Excel dosyaları bulunamadı. Lütfen klasör yapısını kontrol edin.")
+                else:
+                    st.success(f"✅ {len(takas_files)} Takas ve {len(akd_files)} AKD dosyası bulundu.")
+                    
+                    # 2. Takas Farklarını Hesapla
+                    diff_list = []
+                    # i=1'den başlıyoruz çünkü bir önceki dosyayla kıyaslayacağız
+                    for i in range(1, len(takas_files)):
+                        prev = takas_files[i - 1]
+                        curr = takas_files[i]
+                        
+                        df_prev = pd.read_excel(prev["path"])
+                        df_curr = pd.read_excel(curr["path"])
+                        
+                        # Temizlik
+                        df_prev["Takas"] = df_prev["Takas"].apply(clean_takas_value)
+                        df_curr["Takas"] = df_curr["Takas"].apply(clean_takas_value)
+                        
+                        # Birleştir
+                        df_merged = pd.merge(
+                            df_curr, df_prev, on="Kurum", 
+                            suffixes=("_current", "_previous"), how="outer"
+                        )
+                        
+                        # Fark Hesabı
+                        df_merged["Takas_Diff"] = df_merged["Takas_current"].fillna(0) - df_merged["Takas_previous"].fillna(0)
+                        
+                        # Hafta Etiketi
+                        df_merged["Week"] = f"{prev['display']} - {curr['display']}"
+                        
+                        diff_list.append(df_merged)
+                    
+                    if diff_list:
+                        all_diffs = pd.concat(diff_list, ignore_index=True).fillna(0)
+                        
+                        # 3. AKD ile Eşleştirme (Virman Hesabı)
+                        merged_list = []
+                        unique_weeks = all_diffs['Week'].unique()
+                        
+                        # Takas haftaları ile AKD dosyalarını sırasıyla eşleştir
+                        for i, week in enumerate(unique_weeks):
+                            if i < len(akd_files):
+                                akd_info = akd_files[i]
+                                df_akd = pd.read_excel(akd_info["path"])
+                                
+                                # İlgili haftanın takas farkları
+                                subset_takas = all_diffs[all_diffs['Week'] == week]
+                                
+                                # Takas ve AKD birleştir
+                                merged_df = df_akd.merge(subset_takas, on='Kurum', how='outer')
+                                merged_list.append(merged_df)
+                        
+                        if merged_list:
+                            final_df = pd.concat(merged_list, ignore_index=True).fillna(0)
+                            
+                            # Virman Formülü: (Takas Farkı - Net Alım)
+                            final_df['Virman'] = final_df['Takas_Diff'] - final_df['Net']
+                            
+                            st.session_state['final_df'] = final_df
+                            st.session_state['processed'] = True
+                        else:
+                            st.error("AKD dosyaları ile Takas verileri eşleştirilemedi.")
+                    else:
+                        st.error("Takas farkı hesaplanamadı (En az 2 sıralı dosya gerekir).")
 
-# Display Results
+            except Exception as e:
+                st.error(f"Bir hata oluştu: {str(e)}")
+            
+            finally:
+                # 4. Temizlik (Geçici klasörleri sil)
+                if takas_temp_dir and os.path.exists(takas_temp_dir):
+                    shutil.rmtree(takas_temp_dir)
+                if akd_temp_dir and os.path.exists(akd_temp_dir):
+                    shutil.rmtree(akd_temp_dir)
+
+# ---------------------------------------------------------
+# 5. SONUÇ EKRANI
+# ---------------------------------------------------------
 if 'processed' in st.session_state and st.session_state['processed']:
-    st.markdown("---")
+    df = st.session_state['final_df']
     
-    tab1, tab2, tab3 = st.tabs(["📊 Virman Analizi", "📈 Hacim Analizi", "📉 Grafikler"])
+    st.markdown("### 📊 Analiz Sonuçları")
+    
+    tab1, tab2 = st.tabs(["Özet & Virman Kontrol", "Tüm Veriler"])
     
     with tab1:
-        st.header("💰 Virman Analizi")
+        st.write("**Kurum Bazlı Virman Sağlaması**")
+        st.caption("Toplam Takas Değişimi ile Virman arasındaki farkın 0 olması beklenir.")
         
-        virman_df = st.session_state['virman_df']
+        # Özet Tabloyu Hazırla
+        summary_rows = []
+        # Kurumları sıralı al
+        unique_kurumlar = sorted([str(k) for k in df['Kurum'].unique()])
         
-        # Toplam Virman hesapla
-        total_virman = virman_df['Virman'].sum()
-        
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Toplam Satır", len(virman_df))
-        with col2:
-            st.metric("Kurum Sayısı", virman_df['Kurum'].nunique())
-        with col3:
-            st.metric("Hafta Sayısı", virman_df['Week'].nunique())
-        with col4:
-            st.metric("💰 TOPLAM VİRMAN", f"{total_virman:,.2f}")
-        
-        st.markdown("---")
-        
-        # Filtreler
-        st.subheader("🔍 Filtreler")
-        col_filter1, col_filter2 = st.columns(2)
-        
-        with col_filter1:
-            kurum_options = sorted([str(k) for k in virman_df['Kurum'].unique()])
-            selected_kurum = st.multiselect(
-                "Kurum Seçin",
-                options=kurum_options,
-                default=None,
-                placeholder="Tüm Kurumlar"
-            )
-        
-        with col_filter2:
-            week_options = sorted([str(w) for w in virman_df['Week'].unique()])
-            selected_week = st.multiselect(
-                "Hafta Seçin",
-                options=week_options,
-                default=None,
-                placeholder="Tüm Haftalar"
-            )
-        
-        # Filtreleme uygula
-        filtered_df = virman_df.copy()
-        
-        if selected_kurum:
-            filtered_df = filtered_df[filtered_df['Kurum'].isin(selected_kurum)]
-        
-        if selected_week:
-            filtered_df = filtered_df[filtered_df['Week'].isin(selected_week)]
-        
-        # Filtrelenmiş toplam
-        filtered_virman = filtered_df['Virman'].sum()
-        
-        if selected_kurum or selected_week:
-            st.info(f"📊 Filtrelenmiş Toplam Virman: **{filtered_virman:,.2f}**")
-        
-        st.subheader("📋 Virman Verileri")
-        st.dataframe(filtered_df, width="stretch")
-        
-        # Kurum bazlı özet
-        st.subheader("🏢 Kurum Bazlı Özet")
-        summary_list = []
-        for kurum in virman_df['Kurum'].unique():
-            kurum_data = virman_df[virman_df['Kurum'] == kurum]
-            if len(kurum_data) > 0:
-                first_takas = kurum_data.iloc[0]['Takas_previous']
-                last_takas = kurum_data.iloc[-1]['Takas_current']
-                total_virman = kurum_data['Virman'].sum()
-                fark = (last_takas - first_takas) - total_virman
+        for kur in unique_kurumlar:
+            temp = df[df['Kurum'] == kur]
+            if len(temp) > 0:
+                first = temp.iloc[0]['Takas_previous']
+                last = temp.iloc[-1]['Takas_current']
+                virman_toplam = temp['Virman'].sum()
                 
-                summary_list.append({
-                    'Kurum': kurum,
-                    'İlk Takas': first_takas,
-                    'Son Takas': last_takas,
-                    'Toplam Virman': total_virman,
-                    'Fark': fark
+                gercek_fark = last - first
+                kontrol = gercek_fark - virman_toplam
+                
+                summary_rows.append({
+                    "Kurum": kur,
+                    "İlk Takas": first,
+                    "Son Takas": last,
+                    "Takas Değişimi": gercek_fark,
+                    "Toplam Virman": virman_toplam,
+                    "Fark (Kontrol)": kontrol
                 })
         
-        summary_df = pd.DataFrame(summary_list)
-        st.dataframe(summary_df, width="stretch")
+        summary_df = pd.DataFrame(summary_rows)
         
-        # Download button
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            virman_df.to_excel(writer, sheet_name='Virman', index=False)
-        
-        st.download_button(
-            label="📥 Virman.xlsx İndir",
-            data=buffer.getvalue(),
-            file_name="Virman.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    
-    with tab2:
-        st.header("📈 Hacim Analizi")
-        
-        hacim_df = st.session_state['hacim_df']
-        
-        col1, col2, col3 = st.columns(3)
+        # Filtreleme
+        col1, col2 = st.columns(2)
         with col1:
-            st.metric("Toplam Satır", len(hacim_df))
-        with col2:
-            st.metric("Kurum Sayısı", hacim_df[hacim_df['Kurum'] != 'ALL']['Kurum'].nunique())
-        with col3:
-            st.metric("Hafta Sayısı", hacim_df['Hafta'].nunique())
+            min_fark = st.number_input("Sadece Farkı X'den büyük olanları göster (Mutlak)", value=0, step=100)
         
-        st.subheader("📋 Hacim Verileri")
-        st.dataframe(hacim_df, width="stretch")
+        if min_fark > 0:
+            summary_df = summary_df[summary_df['Fark (Kontrol)'].abs() > min_fark]
+            
+        # TABLO GÖSTERİMİ (Format hatası düzeltildi)
+        # Sadece sayısal kolonlara format uyguluyoruz. "Kurum" kolonu string olduğu için hata vermez.
+        st.dataframe(
+            summary_df.style.format({
+                "İlk Takas": "{:,.0f}",
+                "Son Takas": "{:,.0f}",
+                "Takas Değişimi": "{:,.0f}",
+                "Toplam Virman": "{:,.0f}",
+                "Fark (Kontrol)": "{:,.2f}"
+            }), 
+            use_container_width=True,
+            height=500
+        )
         
-        # Download button
+        # Excel İndir
         buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            hacim_df.to_excel(writer, sheet_name='Hacim', index=False)
-        
-        st.download_button(
-            label="📥 Hacim.xlsx İndir",
-            data=buffer.getvalue(),
-            file_name="Hacim.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    
-    with tab3:
-        st.header("📉 Haftalık Kurum Toplam Grafiği")
-        
-        hacim_df = st.session_state['hacim_df']
-        
-        # Filter out ALL
-        plot_df = hacim_df[hacim_df['Kurum'] != 'ALL']
-        
-        fig = px.line(
-            plot_df,
-            x="Hafta",
-            y="Haftalık Kurum Toplam",
-            color="Kurum",
-            markers=True,
-            title="Haftalık Kurum Toplam Değişimi"
-        )
-        
-        fig.update_layout(
-            xaxis_title="Hafta",
-            yaxis_title="Haftalık Toplam",
-            legend_title="Kurum",
-            hovermode="x unified",
-            height=600
-        )
-        
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Top 10 Institutions
-        st.subheader("🏆 En Yüksek Hacimli 10 Kurum")
-        top10 = (
-            plot_df.groupby("Kurum")["Haftalık Kurum Toplam"]
-            .sum()
-            .sort_values(ascending=False)
-            .head(10)
-        )
-        
-        fig2 = px.bar(
-            x=top10.index,
-            y=top10.values,
-            title="Toplam Hacim - Top 10 Kurum",
-            labels={'x': 'Kurum', 'y': 'Toplam Hacim'}
-        )
-        
-        st.plotly_chart(fig2, use_container_width=True)
+        with pd.ExcelWriter(buffer) as writer:
+            summary_df.to_excel(writer, index=False)
+        st.download_button("📥 Özet Raporu İndir", buffer.getvalue(), "Virman_Ozet.xlsx")
 
-else:
-    # Welcome message
-    st.info("""
-    👋 **Hoş Geldiniz!**
-    
-    Bu uygulama ile Takas ve Hacim Excel dosyalarınızı analiz edebilirsiniz.
-    
-    **Nasıl Kullanılır:**
-    1. Sol menüden dosyalarınızı yükleyin
-    2. "Analizi Başlat" butonuna tıklayın
-    3. Sonuçları görüntüleyin ve indirin
-    
-    **Dosya Formatları:**
-    - **Takas:** Tek tarihli (örn: "1 09.xlsx", "8 09.xlsx")
-    - **AKD & Hacim:** Haftalık aralık (örn: "11-19 09.xlsx")
-    - Tüm dosyalar "Kurum" kolonu içermelidir
-    """)
+    with tab2:
+        st.write("Tüm haftaların birleştirilmiş detaylı verisi:")
+        st.dataframe(df, use_container_width=True)
+        
+        buffer2 = io.BytesIO()
+        with pd.ExcelWriter(buffer2) as writer:
+            df.to_excel(writer, index=False)
+        st.download_button("📥 Detaylı Veriyi İndir", buffer2.getvalue(), "Virman_Detay.xlsx")
