@@ -249,7 +249,6 @@ if 'processed' in st.session_state and st.session_state['processed']:
         
         # Özet Tabloyu Hazırla
         summary_rows = []
-        # Kurumları sıralı al
         unique_kurumlar = sorted([str(k) for k in df['Kurum'].unique()])
         
         for kur in unique_kurumlar:
@@ -273,6 +272,10 @@ if 'processed' in st.session_state and st.session_state['processed']:
         
         summary_df = pd.DataFrame(summary_rows)
         
+        # Toplam Virman Gösterimi
+        total_virman = summary_df['Toplam Virman'].sum()
+        st.markdown(f"### 💰 Toplam Virman: {total_virman:,.0f}")
+        
         # Filtreleme
         col1, col2 = st.columns(2)
         with col1:
@@ -281,8 +284,11 @@ if 'processed' in st.session_state and st.session_state['processed']:
         if min_fark > 0:
             summary_df = summary_df[summary_df['Fark (Kontrol)'].abs() > min_fark]
             
-        # TABLO GÖSTERİMİ (Format hatası düzeltildi)
-        # Sadece sayısal kolonlara format uyguluyoruz. "Kurum" kolonu string olduğu için hata vermez.
+        # TABLO GÖSTERİMİ (Renkli Fark Kontrol)
+        def highlight_diff(val):
+            color = 'red' if abs(val) > 0 else 'green'
+            return f'color: {color}; font-weight: bold'
+        
         st.dataframe(
             summary_df.style.format({
                 "İlk Takas": "{:,.0f}",
@@ -290,7 +296,7 @@ if 'processed' in st.session_state and st.session_state['processed']:
                 "Takas Değişimi": "{:,.0f}",
                 "Toplam Virman": "{:,.0f}",
                 "Fark (Kontrol)": "{:,.2f}"
-            }), 
+            }).applymap(highlight_diff, subset=['Fark (Kontrol)']), 
             use_container_width=True,
             height=500
         )
@@ -300,6 +306,7 @@ if 'processed' in st.session_state and st.session_state['processed']:
         with pd.ExcelWriter(buffer) as writer:
             summary_df.to_excel(writer, index=False)
         st.download_button("📥 Özet Raporu İndir", buffer.getvalue(), "Virman_Ozet.xlsx")
+
 
     with tab2:
         st.write("Tüm haftaların birleştirilmiş detaylı verisi:")
