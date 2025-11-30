@@ -86,6 +86,23 @@ def process_takas_files(takas_files):
         df_prev = pd.read_excel(files_dict[prev_name])
         df_curr = pd.read_excel(files_dict[curr_name])
         
+        # Sadece numeric olması gereken kolonları dönüştür
+        df_prev["Takas"] = (
+            df_prev["Takas"]
+            .astype(str)
+            .str.replace(".", "", regex=False)   # binlik ayırıcı noktaları sil
+            .str.replace(",", ".", regex=False)  # ondalık virgülü noktaya çevir
+            .pipe(pd.to_numeric, errors="coerce")
+        )
+
+        df_curr["Takas"] = (
+            df_curr["Takas"]
+            .astype(str)
+            .str.replace(".", "", regex=False)
+            .str.replace(",", ".", regex=False)
+            .pipe(pd.to_numeric, errors="coerce")
+        )
+
         # Merge by Kurum
         df_merged = pd.merge(
             df_curr,
